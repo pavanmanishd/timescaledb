@@ -69,6 +69,23 @@ SELECT proc_name, owner FROM _timescaledb_config.bgw_job WHERE id = :job_id;
 -- Dropping the user now should work.
 DROP USER renamed_user;
 
-DELETE FROM _timescaledb_config.bgw_job WHERE id = :job_id;
+-- Test that moving a procedure to a new schema updates bgw_job.proc_schema.
+CREATE SCHEMA frugal;
+CREATE PROCEDURE some_magic(job_id INT, config jsonb) LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE NOTICE 'done';
+END;
+$$;
 
+SELECT insert_job('schema_job', 'some_magic', INTERVAL '100ms', INTERVAL '100s', INTERVAL '1s') AS schema_job_id \gset
+SELECT proc_schema, proc_name FROM _timescaledb_config.bgw_job WHERE id = :schema_job_id;
+
+ALTER PROCEDURE some_magic SET SCHEMA frugal;
+SELECT proc_schema, proc_name FROM _timescaledb_config.bgw_job WHERE id = :schema_job_id;
+
+DELETE FROM _timescaledb_config.bgw_job WHERE id = :schema_job_id;
+DROP PROCEDURE frugal.some_magic;
+DROP SCHEMA frugal;
+
+DELETE FROM _timescaledb_config.bgw_job WHERE id = :job_id;
 

@@ -442,6 +442,93 @@ process_drop_trigger_start(ProcessUtilityArgs *args, DropStmt *stmt)
 	ts_cache_release(hcache);
 }
 
+static void
+ts_bgw_job_update_proc(Relation rel, HeapTuple tuple, TupleDesc tupledesc, const char *newschema,
+					   const char *newname)
+{
+	bool isnull[Natts_bgw_job];
+	Datum values[Natts_bgw_job];
+	bool replace[Natts_bgw_job] = { false };
+	HeapTuple new_tuple;
+	NameData proc_name_buf;
+	NameData proc_schema_buf;
+
+	heap_deform_tuple(tuple, tupledesc, values, isnull);
+
+	if (newname != NULL &&
+		strncmp(NameStr(*DatumGetName(values[AttrNumberGetAttrOffset(Anum_bgw_job_proc_name)])),
+				newname,
+				NAMEDATALEN) != 0)
+	{
+		namestrcpy(&proc_name_buf, newname);
+		values[AttrNumberGetAttrOffset(Anum_bgw_job_proc_name)] = NameGetDatum(&proc_name_buf);
+		replace[AttrNumberGetAttrOffset(Anum_bgw_job_proc_name)] = true;
+	}
+
+	if (newschema != NULL &&
+		strncmp(NameStr(*DatumGetName(values[AttrNumberGetAttrOffset(Anum_bgw_job_proc_schema)])),
+				newschema,
+				NAMEDATALEN) != 0)
+	{
+		namestrcpy(&proc_schema_buf, newschema);
+		values[AttrNumberGetAttrOffset(Anum_bgw_job_proc_schema)] = NameGetDatum(&proc_schema_buf);
+		replace[AttrNumberGetAttrOffset(Anum_bgw_job_proc_schema)] = true;
+	}
+
+	new_tuple = heap_modify_tuple(tuple, tupledesc, values, isnull, replace);
+	ts_catalog_update(rel, new_tuple);
+	heap_freetuple(new_tuple);
+}
+
+static void
+ts_bgw_job_rename_proc(ObjectAddress address, const char *newschema, const char *newname)
+{
+	const char *old_proc_schema = get_namespace_name(get_func_namespace(address.objectId));
+	const char *old_proc_name = get_func_name(address.objectId);
+	ScanIterator iterator =
+		ts_scan_iterator_create(BGW_JOB, RowExclusiveLock, CurrentMemoryContext);
+
+	if (old_proc_schema == NULL || old_proc_name == NULL)
+		return;
+
+	ts_scanner_foreach(&iterator)
+	{
+		bool should_free, curr_schema_isnull, curr_name_isnull;
+		TupleInfo *ti = ts_scan_iterator_tuple_info(&iterator);
+		Name curr_proc_schema =
+			DatumGetName(slot_getattr(ti->slot, Anum_bgw_job_proc_schema, &curr_schema_isnull));
+		Name curr_proc_name =
+			DatumGetName(slot_getattr(ti->slot, Anum_bgw_job_proc_name, &curr_name_isnull));
+
+		if (!curr_schema_isnull && !curr_name_isnull &&
+			namestrcmp(curr_proc_name, old_proc_name) == 0 &&
+			namestrcmp(curr_proc_schema, old_proc_schema) == 0)
+		{
+			HeapTuple tuple = ts_scanner_fetch_heap_tuple(ti, false, &should_free);
+
+			ts_bgw_job_update_proc(ti->scanrel,
+						   tuple,
+						   ts_scanner_get_tupledesc(ti),
+						   newschema,
+						   newname);
+
+			if (should_free)
+				heap_freetuple(tuple);
+		}
+	}
+}
+
+static void
+process_alterprocedureschema(ProcessUtilityArgs *args)
+{
+	AlterObjectSchemaStmt *stmt = (AlterObjectSchemaStmt *) args->parsetree;
+
+	Assert(stmt->objectType == OBJECT_PROCEDURE || stmt->objectType == OBJECT_FUNCTION);
+	ObjectAddress address =
+		get_object_address(stmt->objectType, stmt->object, NULL, AccessExclusiveLock, false);
+	ts_bgw_job_rename_proc(address, stmt->newschema, NULL);
+}
+
 /* We use this for both materialized views and views. */
 static void
 process_alterviewschema(ProcessUtilityArgs *args)
@@ -527,6 +614,10 @@ process_alterobjectschema(ProcessUtilityArgs *args)
 		case OBJECT_MATVIEW:
 		case OBJECT_VIEW:
 			process_alterviewschema(args);
+			break;
+		case OBJECT_PROCEDURE:
+		case OBJECT_FUNCTION:
+			process_alterprocedureschema(args);
 			break;
 		default:
 			break;
